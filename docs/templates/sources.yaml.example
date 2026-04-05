@@ -1,0 +1,40 @@
+schemaVersion: 1
+
+defaults:
+  ref: main
+  targetRoot: skills
+  naming: namespace-prefix
+
+sources:
+  - id: vercel
+    enabled: true
+    repo: https://github.com/vercel-labs/agent-skills.git
+    ref: main
+    namespace: vercel
+    discover:
+      - skills
+    include:
+      - frontend-design
+      - skill-creator
+    exclude: []
+
+  - id: internal-shared
+    enabled: true
+    repo: git@github.com:yourorg/internal-shared-skills.git
+    ref: main
+    namespace: internal
+    discover:
+      - skills
+    include: []
+    exclude:
+      - draft-skill
+
+  - id: archive-example
+    enabled: false
+    repo: https://github.com/example/example-skills.git
+    ref: main
+    namespace: example
+    discover:
+      - skills
+    include: []
+    exclude: []

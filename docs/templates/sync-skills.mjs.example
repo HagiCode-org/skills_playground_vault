@@ -1,0 +1,147 @@
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile, cp } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import YAML from "js-yaml";
+
+const execFileAsync = promisify(execFile);
+const repoRoot = process.cwd();
+const configPath = join(repoRoot, "sources.yaml");
+const targetRoot = join(repoRoot, "skills");
+
+async function readConfig() {
+  const raw = await readFile(configPath, "utf-8");
+  return YAML.load(raw);
+}
+
+async function cloneSource(repo, ref, destination) {
+  await execFileAsync("git", ["clone", "--depth", "1", "--branch", ref, repo, destination], {
+    cwd: repoRoot,
+  });
+}
+
+async function listSkillDirs(baseDir) {
+  if (!existsSync(baseDir)) return [];
+  const entries = await readdir(baseDir, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(baseDir, entry.name));
+}
+
+async function readSkillMeta(skillDir) {
+  const skillPath = join(skillDir, "SKILL.md");
+  if (!existsSync(skillPath)) return null;
+
+  const raw = await readFile(skillPath, "utf-8");
+  const nameMatch = raw.match(/^name:\s*(.+)$/m);
+  const descMatch = raw.match(/^description:\s*(.+)$/m);
+
+  if (!nameMatch || !descMatch) return null;
+
+  return {
+    raw,
+    name: nameMatch[1].trim().replace(/^['"]|['"]$/g, ""),
+    description: descMatch[1].trim().replace(/^['"]|['"]$/g, ""),
+  };
+}
+
+function shouldInclude(skillName, source) {
+  const include = source.include ?? [];
+  const exclude = source.exclude ?? [];
+
+  if (exclude.includes(skillName)) return false;
+  if (include.length === 0) return true;
+  return include.includes(skillName);
+}
+
+function buildTargetName(source, skillName) {
+  return source.namespace ? `${source.namespace}-${skillName}` : skillName;
+}
+
+async function writeManagedMarker(targetDir, marker) {
+  await writeFile(join(targetDir, ".skill-source.json"), JSON.stringify(marker, null, 2) + "\n");
+}
+
+async function syncSource(source, expectedTargets) {
+  if (source.enabled === false) return;
+
+  const tempRoot = await mkdtemp(join(tmpdir(), `skills-sync-${source.id}-`));
+
+  try {
+    const ref = source.ref ?? "main";
+    await cloneSource(source.repo, ref, tempRoot);
+
+    for (const discoverDir of source.discover ?? ["skills"]) {
+      const absoluteDiscoverDir = join(tempRoot, discoverDir);
+      const skillDirs = await listSkillDirs(absoluteDiscoverDir);
+
+      for (const skillDir of skillDirs) {
+        const meta = await readSkillMeta(skillDir);
+        if (!meta) continue;
+        if (!shouldInclude(meta.name, source)) continue;
+
+        const targetName = buildTargetName(source, meta.name);
+        const targetDir = join(targetRoot, targetName);
+
+        await rm(targetDir, { recursive: true, force: true });
+        await mkdir(targetDir, { recursive: true });
+        await cp(skillDir, targetDir, { recursive: true, force: true });
+
+        await writeManagedMarker(targetDir, {
+          sourceId: source.id,
+          repo: source.repo,
+          ref,
+          originalName: meta.name,
+          targetName,
+        });
+
+        expectedTargets.add(targetName);
+      }
+    }
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+}
+
+async function cleanupStaleManagedSkills(activeSourceIds, expectedTargets) {
+  if (!existsSync(targetRoot)) return;
+
+  const entries = await readdir(targetRoot, { withFileTypes: true });
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+
+    const skillDir = join(targetRoot, entry.name);
+    const markerPath = join(skillDir, ".skill-source.json");
+    if (!existsSync(markerPath)) continue;
+
+    const marker = JSON.parse(await readFile(markerPath, "utf-8"));
+    if (!activeSourceIds.has(marker.sourceId)) continue;
+    if (expectedTargets.has(entry.name)) continue;
+
+    await rm(skillDir, { recursive: true, force: true });
+  }
+}
+
+async function main() {
+  const config = await readConfig();
+  await mkdir(targetRoot, { recursive: true });
+
+  const expectedTargets = new Set();
+  const activeSourceIds = new Set();
+
+  for (const source of config.sources ?? []) {
+    if (source.enabled === false) continue;
+    activeSourceIds.add(source.id);
+    await syncSource(source, expectedTargets);
+  }
+
+  await cleanupStaleManagedSkills(activeSourceIds, expectedTargets);
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
