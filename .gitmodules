@@ -1,0 +1,3 @@
+[submodule "repos/vercel-labs-skills"]
+	path = repos/vercel-labs-skills
+	url = https://github.com/vercel-labs/skills.git
